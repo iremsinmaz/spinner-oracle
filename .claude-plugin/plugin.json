@@ -1,0 +1,9 @@
+{
+  "name": "toon-spinner",
+  "version": "0.1.0",
+  "description": "Pixel-art Claude plows toward a barn labeled with the current tool and file, captioned by Sonnet, above the prompt while a turn runs.",
+  "author": { "name": "iremsinmaz" },
+  "license": "MIT",
+  "keywords": ["animation", "pixel-art", "function-hooks", "ui", "fun"],
+  "types": "./types/index.d.ts"
+}

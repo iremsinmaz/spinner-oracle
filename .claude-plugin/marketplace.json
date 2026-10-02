@@ -1,0 +1,15 @@
+{
+  "name": "toon-spinner",
+  "description": "A pixel-art Claude farm scene for Claude Code.",
+  "owner": {
+    "name": "iremsinmaz"
+  },
+  "plugins": [
+    {
+      "name": "toon-spinner",
+      "source": "./",
+      "description": "Pixel-art Claude plows toward a barn labeled with the current tool and file, captioned by Sonnet, above the prompt while a turn runs.",
+      "category": "fun"
+    }
+  ]
+}

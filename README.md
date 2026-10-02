@@ -12,10 +12,22 @@ Vibing… (35s · ↓ 1.8k tokens)
 ╰────────────────────────────────────────────────────────────────────────────╯
 ```
 
+## Screenshots
+
+![space scene](assets/space.png)
+
+![meadow scene](assets/meadow.png)
+
+![ocean scene](assets/ocean.png)
+
+![castle scene](assets/castle.png)
+
+![road scene](assets/road.png)
+
 ## Install
 
 ```sh
-claude plugin marketplace add iremsinmaz/toon-spinner
+claude plugin marketplace add iremsinmaz/spinner-oracle
 claude plugin install spinner-oracle@toon-spinner
 ```
 

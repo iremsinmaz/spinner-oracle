@@ -1,127 +1,141 @@
-import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Scene } from '../types'
-import { paint, ROWS, SPEED } from './paint'
-import type { Mode } from './paint'
+import { DEFAULT_SCENE, Narrator } from './narrator'
+import type { EventKind } from './narrator'
+import { ROWS, Stage } from './script'
 
-const scene = atom({ plugin: 'toon-spinner', key: 'scene' } as const, null as Scene | null)
+// Module state: a reload starts these over, which is fine for a live cartoon.
+const stage = new Stage(DEFAULT_SCENE)
+const narrator = new Narrator((reply, keepScene) => {
+  stage.typer.type(reply.speech)
+  if (!keepScene && reply.scene) stage.load(reply.scene, Date.now())
+})
+let mounted: { id: string; width: number } | null = null
+let blitting = false
 
-const SYSTEM =
-  'You are Claude, captioning a pixel-art animation of yourself: the little orange Claude mascot plows a crop field toward a barn ' +
-  'labeled with the file you are working on. Given what you are doing right now, ' +
-  'reply with ONE playful farm-flavored sentence, at most 9 words, naming the file or command, ' +
-  "like: Plowing through effects.ts, hunting for bugs. No quotes, nothing else."
+const FRAME_MS = 50 // ~20 fps
+const STILL_MS = 20_000 // how often a long tool call pings "still running"
 
-// ponytail: one Sonnet call in flight, newest tool call wins; skipped calls never get a caption
-let busy = false
-let queued: string | null = null
-// the mounted spinner the animation blits into; a module variable, so a reload waits for the next draw
-let mounted: { id: string; width: number; label: string } | null = null
-let tick = 0
-let pos = 0
-let mode: Mode = 'think'
-
-async function caption($: EngineInterface, activity: string): Promise<void> {
-  busy = true
-  const r = await $.model.complete({
-    model: 'claude-sonnet-5-5',
-    system: SYSTEM,
-    prompt: `You are doing this right now: ${activity}`,
-    maxTokens: 60,
-    effort: 'low',
-    timeoutMs: 15000,
+/** Starts the narrator's background loop if it is idle. Never awaited: the agent never waits on it. */
+function pump($: EngineInterface): void {
+  void narrator.pump({
+    complete: (ask, signal) => $.model.complete(ask, { signal }),
+    sleep: (ms, signal) => $.clock.sleep(ms, { signal }),
   })
-  const text = r.isAnswered ? r.text.trim().split('\n')[0]!.replace(/^["']|["']$/g, '').slice(0, 64) : ''
-  if (text) await update($, scene, s => (s ? { ...s, caption: text } : s))
-  busy = false
-  const nextUp = queued
-  queued = null
-  if (nextUp) void caption($, nextUp)
 }
 
-async function animate($: EngineInterface): Promise<void> {
-  if (!mounted) return
-  tick += 1
-  pos += SPEED[mode]
-  const r = await $.ui.blit({ requestId: mounted.id, key: 'scene', columns: mounted.width, rows: ROWS, cells: paint(mounted.width, mounted.label, tick, pos, mode) })
-  if (r.deny) mounted = null
+function tell($: EngineInterface, kind: EventKind, text: string): void {
+  narrator.push(kind, text)
+  pump($)
 }
 
-function modeFor(tool: string): Mode {
-  if (tool === 'Bash') return 'run'
-  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') return 'edit'
-  return 'read'
-}
-
-function targetFor(tool: string, input: Record<string, unknown>): string {
-  const path = input.file_path ?? input.path ?? input.notebook_path
-  if (typeof path === 'string' && path) return path.split('/').pop()!
-  if (typeof input.command === 'string') {
-    const cmd = input.command.trim().replace(/^cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/, '')
-    return cmd.split(/\s+/)[0] || tool
+async function tick($: EngineInterface): Promise<void> {
+  if (!mounted || blitting) return
+  blitting = true
+  try {
+    const { id, width } = mounted
+    const r = await $.ui.blit({ requestId: id, key: 'oracle', columns: width, rows: ROWS, cells: stage.frame(width, Date.now()) })
+    if (r.deny) mounted = null
+  } catch {
+    mounted = null
+  } finally {
+    blitting = false
   }
-  if (typeof input.pattern === 'string') return input.pattern
-  return tool
 }
 
-/** The barn's sign: the tool and what it works on, like "Read effects.ts". */
-function labelFor(tool: string, input: Record<string, unknown>): string {
-  const target = targetFor(tool, input)
-  return target === tool ? tool : `${tool} ${target}`
+/** A tool call in a line: its name and the argument that says the most (a path, a command, a pattern). */
+export function describe(tool: string, input: Record<string, unknown>): string {
+  const s = (v: unknown) => (typeof v === 'string' ? v : '')
+  const path = s(input.file_path) || s(input.path) || s(input.notebook_path)
+  const parts = [tool]
+  if (path) parts.push(path.split('/').slice(-2).join('/'))
+  if (s(input.command)) parts.push(`$ ${s(input.command).replace(/^cd\s+("[^"]*"|'[^']*'|\S+)\s*&&\s*/, '').slice(0, 120)}`)
+  if (s(input.pattern)) parts.push(`pattern ${JSON.stringify(s(input.pattern).slice(0, 60))}`)
+  if (s(input.description)) parts.push(`(${s(input.description).slice(0, 80)})`)
+  if (s(input.prompt) && parts.length === 1) parts.push(s(input.prompt).slice(0, 80))
+  return parts.join(' ')
 }
 
 export const register: Register = on => {
   on('session.start', ($, e, next) => {
-    // ponytail: ticks all session, ~7/s; idle ticks return at once
-    $.clock.every(140, () => animate($))
+    try {
+      $.clock.every(FRAME_MS, () => tick($))
+    } catch {
+      // no animation, but the first frame still draws with the spinner
+    }
     return next(e)
   })
 
-  on('prompt.submit', async ($, e, next) => {
-    await update($, scene, () => null)
+  on('prompt.submit', ($, e, next) => {
+    if (e.text.trim() && !e.text.trim().startsWith('/')) narrator.setTask(e.text)
+    return next(e)
+  })
+
+  on('turn.start', ($, e, next) => {
+    narrator.startTurn()
+    stage.current = null // the default scene until the narrator's first reply
+    stage.previous = null
+    stage.typer.type('Reading the task…')
+    tell($, 'turn', 'a new turn started; the agent is reading the task')
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId === undefined) {
-      const { tool, agentId, ...input } = e as Record<string, unknown>
-      const label = labelFor(String(tool), input)
-      await update($, scene, s => ({ caption: s?.caption ?? 'Heading out to the field...', label }))
-      const activity = `${String(tool)} ${JSON.stringify(input)}`.slice(0, 200)
-      if (busy) queued = activity
-      else void caption($, activity)
-      mode = modeFor(String(tool))
+    if (e.agentId !== undefined) return next(e)
+    const { tool, agentId, ...input } = e as Record<string, unknown>
+    const line = describe(String(tool), input)
+    tell($, 'tool', line)
+    const started = Date.now()
+    let still: { cancel: () => void } | null = null
+    try {
+      still = $.clock.every(STILL_MS, () => tell($, 'still', `${line} (${Math.round((Date.now() - started) / 1000)}s)`))
+    } catch {
+      // no pings then; the tool call itself must never fail because of the cartoon
+    }
+    try {
       const ran = await next(e)
-      mode = 'think'
+      if (ran.deny === undefined && ran.isError === true) tell($, 'result', `${String(tool)} failed`)
       return ran
+    } finally {
+      still?.cancel()
+    }
+  })
+
+  on('session.append', ($, e, next) => {
+    if (e.agentId === undefined && e.door === 'response' && e.message.type === 'assistant') {
+      const text = e.message.content
+        .map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : ''))
+        .join(' ')
+        .trim()
+      if (text) tell($, 'text', `the agent says: ${text.slice(0, 200)}`)
     }
     return next(e)
   })
 
-  // the band above the prompt stays up all turn, unlike the spinner, which hides while a tool runs
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const s = await read($, scene)
-    if (s === null || !e.props.isWorking || e.props.hasSurvey) {
-      mounted = null
-      return next(e)
-    }
+  on('turn.complete', ($, e, next) => {
+    narrator.endTurn()
+    return next(e)
+  })
 
-    if (e.surface !== 'terminal' || e.props.maxRows < ROWS) {
-      const { Text } = $.ui.resolve(e)
-      return <Text color="#d97757">{s.caption}</Text>
-    }
-
-    const { Box, Text, Raster } = $.ui.resolve(e)
-    const width = Math.max(24, Math.min(64, e.props.bodyColumns - 34))
-    mounted = { id: e.requestId, width, label: s.label }
-    return (
-      <Box flexDirection="row" alignItems="center">
-        <Box borderStyle="round" borderColor="gray" paddingX={1} width={32}>
-          <Text>{s.caption}</Text>
+  // The spinner region: the engine's own status line on top, the scene full width under it.
+  // Anything going wrong here hands back the engine's spinner untouched.
+  on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
+    const line = await next(e)
+    if (e.surface !== 'terminal') return line
+    try {
+      const { Box, Raster } = $.ui.resolve(e)
+      const width = Math.max(20, Math.min(240, (e.viewport?.columns ?? 80) - 2))
+      mounted = { id: e.requestId, width }
+      narrator.width = width
+      return (
+        <Box flexDirection="column">
+          {line}
+          <Raster key="oracle" columns={width} rows={ROWS} cells={stage.frame(width, Date.now())} />
         </Box>
-        <Raster key="scene" columns={width} rows={ROWS} cells={paint(width, s.label, tick, pos, mode)} />
-      </Box>
-    )
+      )
+    } catch {
+      mounted = null
+      return line
+    }
   })
 }

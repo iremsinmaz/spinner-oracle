@@ -1,9 +1,8 @@
 {
-  "name": "toon-spinner",
+  "name": "spinner-oracle",
   "version": "0.1.0",
-  "description": "Pixel-art Claude plows toward a barn labeled with the current tool and file, captioned by Sonnet, above the prompt while a turn runs.",
+  "description": "Replaces the thinking spinner with a live pixel-art cartoon of what the agent is doing, scripted on the fly by Sonnet.",
   "author": { "name": "iremsinmaz" },
   "license": "MIT",
-  "keywords": ["animation", "pixel-art", "function-hooks", "ui", "fun"],
-  "types": "./types/index.d.ts"
+  "keywords": ["animation", "pixel-art", "function-hooks", "ui", "fun"]
 }

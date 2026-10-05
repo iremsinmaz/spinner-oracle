@@ -19,9 +19,9 @@ export type EventKind = 'task' | 'tool' | 'text' | 'turn' | 'result'
 export type Event = { kind: EventKind; text: string; topic?: string }
 export type Ask = { model: string; system: string; prompt: string; maxTokens: number; effort: 'low'; timeoutMs: number }
 export type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
-export type Answer = ({ isAnswered: true; text: string } | { isAnswered: false; reason: string }) & { usage?: Usage }
+export type Answer = ({ isAnswered: true; text: string } | { isAnswered: false; reason: string; status?: number | null }) & { usage?: Usage }
 /** What the narrator has cost since the module loaded: model requests and their tokens. */
-export type Spent = { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number }
+export type Spent = { requests: number; failed: Record<string, number>; input: number; output: number; cacheRead: number; cacheWrite: number }
 export type Deps = {
   complete: (ask: Ask, signal: AbortSignal) => Promise<Answer>
   sleep: (ms: number, signal: AbortSignal) => Promise<void>
@@ -65,7 +65,7 @@ export class Narrator {
   dropped = 0
   failures = 0
   width = 80
-  spent: Spent = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  spent: Spent = { requests: 0, failed: {}, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   private busy = false
   private active = false
   private stop = new AbortController()
@@ -152,6 +152,10 @@ export class Narrator {
         signal,
       )
       this.spent.requests++
+      if (!r.isAnswered) {
+        const why = r.status ? `${r.reason} ${r.status}` : r.reason
+        this.spent.failed[why] = (this.spent.failed[why] ?? 0) + 1
+      }
       if (r.usage) {
         this.spent.input += r.usage.input_tokens
         this.spent.output += r.usage.output_tokens

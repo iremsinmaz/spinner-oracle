@@ -70,9 +70,11 @@ const n = (x: number) => x.toLocaleString('en-US')
 /** /spinner-usage: what the narrator has spent on the model since the mod loaded. */
 export function usageReport(s: Spent): string {
   const input = s.input + s.cacheRead + s.cacheWrite
-  if (!s.requests) return 'spinner-oracle has made no model requests yet.'
+  if (!s.requests) return 'No model requests yet.'
+  const failed = Object.entries(s.failed)
+  const nFailed = failed.reduce((sum, [, k]) => sum + k, 0)
   return [
-    `spinner-oracle: ${n(s.requests)} model requests since it loaded`,
+    `${n(s.requests)} model requests since it loaded` + (nFailed ? ` (${n(nFailed)} unanswered: ${failed.map(([why, k]) => `${k} ${why}`).join(', ')})` : ''),
     `  input  ${n(input)} tokens (${n(s.input)} uncached, ${n(s.cacheRead)} cache read, ${n(s.cacheWrite)} cache write)`,
     `  output ${n(s.output)} tokens`,
     `  per request: ~${n(Math.round(input / s.requests))} in, ~${n(Math.round(s.output / s.requests))} out`,

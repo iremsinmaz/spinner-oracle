@@ -59,6 +59,8 @@ test('/spinner-usage tallies model tokens, and /close-spinner stops the calls an
   const report = (await $.command.run({ command: 'spinner-usage' })).text ?? ''
   expect(report).toContain(`${calls} model requests`)
   expect(report).toContain(`output ${(40 * calls).toLocaleString('en-US')} tokens`)
+  expect(report).not.toContain('spinner-oracle:')
+  expect(report).not.toContain('unanswered')
 
   await $.command.run({ command: 'close-spinner' })
   const before = calls

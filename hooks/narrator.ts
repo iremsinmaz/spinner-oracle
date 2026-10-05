@@ -1,9 +1,10 @@
-// The narrator: a running conversation with Sonnet about what the main agent is doing. Each batch of
+// The narrator: a running conversation with Haiku about what the main agent is doing. Each batch of
 // events goes out with the task and the recent exchanges; the reply is { speech, scene }, scene being
-// a program in the scene language (or null to keep the scene that is up). Pure: the caller hands in
+// a program in the scene language (or null to keep the scene that is up). A new scene is asked for only
+// when the turn starts or the agent moves to another file or tool; otherwise the reply is speech only. Pure: the caller hands in
 // the model call and the sleep, so nothing here touches the engine and every path is testable.
 
-export const MODEL = 'claude-sonnet-5-5'
+export const MODEL = 'claude-haiku-4-5-20251001'
 export const MAX_TOKENS = 16_000
 export const TRIM_AT = 30
 export const TRIM_TO = 15
@@ -13,9 +14,14 @@ const MAX_QUEUE = 12
 
 export type Reply = { speech: string; scene: string | null }
 export type Exchange = { events: string; speech: string; scene: string | null }
-export type EventKind = 'task' | 'tool' | 'text' | 'turn' | 'still' | 'result'
+export type EventKind = 'task' | 'tool' | 'text' | 'turn' | 'result'
+/** One thing the agent did; `topic` (a file, or a tool name) changing is what earns a new scene. */
+export type Event = { kind: EventKind; text: string; topic?: string }
 export type Ask = { model: string; system: string; prompt: string; maxTokens: number; effort: 'low'; timeoutMs: number }
-export type Answer = { isAnswered: true; text: string } | { isAnswered: false; reason: string }
+export type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+export type Answer = ({ isAnswered: true; text: string } | { isAnswered: false; reason: string }) & { usage?: Usage }
+/** What the narrator has cost since the module loaded: model requests and their tokens. */
+export type Spent = { requests: number; input: number; output: number; cacheRead: number; cacheWrite: number }
 export type Deps = {
   complete: (ask: Ask, signal: AbortSignal) => Promise<Answer>
   sleep: (ms: number, signal: AbortSignal) => Promise<void>
@@ -54,15 +60,17 @@ export function parseReply(text: string): Reply | null {
 export class Narrator {
   task = ''
   history: Exchange[] = []
-  queue: { kind: EventKind; text: string }[] = []
+  queue: Event[] = []
+  topic = '' // what the scene up now is about
   dropped = 0
   failures = 0
   width = 80
+  spent: Spent = { requests: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   private busy = false
   private active = false
   private stop = new AbortController()
 
-  /** Called with each good reply; `keepScene` when the batch was only "still running" pings. */
+  /** Called with each good reply; `keepScene` when the batch asked for speech only. */
   constructor(private onReply: (reply: Reply, keepScene: boolean) => void) {}
 
   setTask(text: string): void {
@@ -77,6 +85,7 @@ export class Narrator {
     this.queue = []
     this.dropped = 0
     this.failures = 0
+    this.topic = ''
   }
 
   endTurn(): void {
@@ -85,9 +94,9 @@ export class Narrator {
     this.stop.abort()
   }
 
-  push(kind: EventKind, text: string): void {
+  push(kind: EventKind, text: string, topic?: string): void {
     if (!this.active) return
-    this.queue.push({ kind, text: text.replace(/\s+/g, ' ').trim().slice(0, 300) })
+    this.queue.push({ kind, text: text.replace(/\s+/g, ' ').trim().slice(0, 300), topic })
     if (this.queue.length > MAX_QUEUE) {
       this.dropped += this.queue.length - MAX_QUEUE
       this.queue = this.queue.slice(-MAX_QUEUE)
@@ -105,7 +114,8 @@ export class Narrator {
         const dropped = this.dropped
         this.queue = []
         this.dropped = 0
-        const reply = await this.ask(deps, batch, dropped, signal)
+        const wantScene = this.wantsScene(batch)
+        const reply = await this.ask(deps, batch, dropped, wantScene, signal)
         if (signal.aborted) return
         if (!reply) {
           this.failures++
@@ -114,9 +124,11 @@ export class Narrator {
           continue
         }
         this.failures = 0
-        this.history = trimHistory([...this.history, { events: format(batch, dropped), speech: reply.speech, scene: reply.scene }])
+        const scene = wantScene ? reply.scene : null
+        if (wantScene) this.topic = [...batch].reverse().find(e => e.topic)?.topic ?? this.topic
+        this.history = trimHistory([...this.history, { events: format(batch, dropped), speech: reply.speech, scene }])
         try {
-          this.onReply(reply, batch.every(e => e.kind === 'still'))
+          this.onReply({ speech: reply.speech, scene }, !wantScene)
         } catch {
           // a bad scene is the stage's problem; the loop carries on
         }
@@ -128,12 +140,24 @@ export class Narrator {
     }
   }
 
-  private async ask(deps: Deps, batch: { kind: EventKind; text: string }[], dropped: number, signal: AbortSignal): Promise<Reply | null> {
+  /** A new scene at the turn's start, and when the agent moves to another file or tool. */
+  wantsScene(batch: Event[]): boolean {
+    return batch.some(e => e.kind === 'turn' || (e.topic !== undefined && e.topic !== this.topic))
+  }
+
+  private async ask(deps: Deps, batch: Event[], dropped: number, wantScene: boolean, signal: AbortSignal): Promise<Reply | null> {
     try {
       const r = await deps.complete(
-        { model: MODEL, system: SYSTEM, prompt: this.prompt(batch, dropped), maxTokens: MAX_TOKENS, effort: 'low', timeoutMs: 240_000 },
+        { model: MODEL, system: SYSTEM, prompt: this.prompt(batch, dropped, wantScene), maxTokens: MAX_TOKENS, effort: 'low', timeoutMs: 240_000 },
         signal,
       )
+      this.spent.requests++
+      if (r.usage) {
+        this.spent.input += r.usage.input_tokens
+        this.spent.output += r.usage.output_tokens
+        this.spent.cacheRead += r.usage.cache_read_input_tokens
+        this.spent.cacheWrite += r.usage.cache_creation_input_tokens
+      }
       return r.isAnswered ? parseReply(r.text) : null
     } catch {
       return null
@@ -141,7 +165,7 @@ export class Narrator {
   }
 
   /** The conversation so far, flattened into one prompt (the model helper takes a single message). */
-  prompt(batch: { kind: EventKind; text: string }[], dropped = 0): string {
+  prompt(batch: Event[], dropped = 0, wantScene = true): string {
     const parts = [`THE USER'S TASK:\n${this.task || '(not stated)'}`]
     if (this.history.length) {
       parts.push('YOUR EARLIER REPLIES (oldest first):')
@@ -152,18 +176,22 @@ export class Narrator {
       })
     }
     parts.push(`NEW EVENTS:\n${format(batch, dropped)}`)
-    parts.push(`The canvas is ${this.width} cells wide (W = ${this.width}). Reply with the JSON object only.`)
+    parts.push(
+      wantScene
+        ? `Write a new scene. The canvas is ${this.width} cells wide (W = ${this.width}). Reply with the JSON object only.`
+        : 'Speech only: the scene stays. Reply with {"speech": "...", "scene": null} and nothing else.',
+    )
     return parts.join('\n\n')
   }
 }
 
-function format(batch: { kind: EventKind; text: string }[], dropped: number): string {
-  const lines = batch.map(e => `- ${e.kind === 'still' ? 'still running: ' : ''}${e.text}`)
+function format(batch: Event[], dropped: number): string {
+  const lines = batch.map(e => `- ${e.text}`)
   if (dropped) lines.unshift(`- (${dropped} earlier events skipped)`)
   return lines.join('\n')
 }
 
-/** The built-in scene: what shows before Sonnet's first reply, and the example in the system prompt. */
+/** The built-in scene: what shows before the model's first reply, and the example in the system prompt. */
 export const EXAMPLE_SCENE = `// Theme: space. The crab flies a little ship through an asteroid field toward effects.ts,
 // hunting the one rock with a bug in it.
 const rocks = []
@@ -208,8 +236,8 @@ REPLY FORMAT: one JSON object and nothing else:
 {"speech": "...", "scene": "<program source>" | null}
 - speech: one or two short, playful lines (under 90 characters) narrating the current step in the
   first person, as the crab. Name what it is touching. Example: "Pinging the asteroid field. One rock has a bug in it."
-- scene: a complete program (below), or null to keep the scene that is up. Use null when the new
-  event is the same activity carrying on (a "still running" ping, the same file again).
+- scene: a complete program (below), or null to keep the scene that is up. The last line of each
+  request says which: "Write a new scene" or "Speech only" (then scene must be null).
 - Pick a backdrop that fits the task metaphorically: forest (searching), road with cars (running
   commands, pipelines), castle wall (security, auth, rules), space with asteroids (debugging),
   ocean with fish (data, streams, logs), workshop (editing, building), meadow (reading, planning).

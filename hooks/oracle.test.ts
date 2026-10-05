@@ -79,6 +79,8 @@ describe('the narrator', () => {
     expect(got).toEqual(['Back on the road!'])
     expect(n.failures).toBe(0)
     expect(n.history.length).toBe(1)
+    expect(n.spent.requests).toBe(3) // the thrown one never reached an answer
+    expect(n.spent.failed).toEqual({ 'api-error': 1 })
   })
 
   test('a new scene at the turn start and on a new file or tool; speech only otherwise', async () => {

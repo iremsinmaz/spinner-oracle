@@ -1,6 +1,6 @@
 {
   "name": "spinner-oracle",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Replaces the thinking spinner with a live pixel-art cartoon of what the agent is doing, scripted on the fly by Sonnet.",
   "author": { "name": "iremsinmaz" },
   "license": "MIT",

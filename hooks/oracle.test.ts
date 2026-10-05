@@ -81,16 +81,26 @@ describe('the narrator', () => {
     expect(n.history.length).toBe(1)
   })
 
-  test('"still running" pings keep the scene', async () => {
-    const calls: boolean[] = []
-    const n = new Narrator((_, keep) => calls.push(keep))
+  test('a new scene at the turn start and on a new file or tool; speech only otherwise', async () => {
+    const keeps: boolean[] = []
+    const asks: string[] = []
+    const n = new Narrator((r, keep) => { keeps.push(keep); if (keep) expect(r.scene).toBeNull() })
     n.startTurn()
-    const deps = { complete: async () => ({ isAnswered: true, text: '{"speech":"Still digging.","scene":"function update(t) {}"}' }) as Answer, sleep: async () => {} }
-    n.push('still', 'Bash $ npm test (20s)')
-    await n.pump(deps)
-    n.push('tool', 'Read README.md')
-    await n.pump(deps)
-    expect(calls).toEqual([true, false])
+    const deps = {
+      complete: async (ask: { prompt: string }) => { asks.push(ask.prompt); return { isAnswered: true, text: '{"speech":"Digging.","scene":"function update(t) {}"}' } as Answer },
+      sleep: async () => {},
+    }
+    const step = async (kind: 'turn' | 'tool' | 'text', text: string, topic?: string) => { n.push(kind, text, topic); await n.pump(deps) }
+    await step('turn', 'a new turn started')
+    await step('tool', 'Read a.ts', '/r/a.ts')
+    await step('tool', 'Edit a.ts', '/r/a.ts')
+    await step('text', 'the agent says: done with a')
+    await step('tool', 'Read b.ts', '/r/b.ts')
+    await step('tool', 'Bash $ npm test', 'Bash')
+    await step('tool', 'Bash $ npm run lint', 'Bash')
+    expect(keeps).toEqual([false, false, true, true, false, false, true])
+    expect(asks[2]).toContain('Speech only')
+    expect(asks[4]).toContain('Write a new scene')
   })
 
   test('the turn ending stops the loop mid-backoff', async () => {
